@@ -1,0 +1,9 @@
+# Session fixtures and scratch recordings — gigabytes of MCAP, never source.
+data/
+
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Per-machine Claude Code permissions.
+.claude/settings.local.json
