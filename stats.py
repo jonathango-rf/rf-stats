@@ -420,9 +420,52 @@ def print_report(stats, filter_desc=None, level=0):
 
 CODE_PREFIX = "RF1:"
 
-# The station type each run mode lands in on the tracker side. A UR machine does
-# both, so the mode -- not the hostname -- is what tells the two apart.
-CODE_MODES = ("gello", "inference")
+# The station type a code lands on in the tracker. Only GELLO runs are emitted for
+# now; the field stays in the payload because the tracker routes on it.
+CODE_MODE = "gello"
+
+# A station's name is typed once and remembered here, so later runs -- and the
+# people running them -- never have to know it.
+STATION_FILE = os.path.expanduser("~/.rf-station")
+
+
+def read_station_name():
+    """The station name saved on this machine, or None if never set."""
+    try:
+        with open(STATION_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def save_station_name(name):
+    """Remember a station name for later runs. Returns the path written, or None.
+
+    A read-only home or full disk is not worth failing a report over -- the name
+    still applies to the run in hand, it just will not be there next time.
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    try:
+        with open(STATION_FILE, "w") as f:
+            f.write(name + "\n")
+    except OSError:
+        return None
+    return STATION_FILE
+
+
+def station_name(override=None):
+    """Resolve the station name, most explicit source first.
+
+    --name beats RF_STATION, which beats the saved file, which beats the hostname.
+    The hostname is only ever a last resort: it is stable but rarely the label the
+    Shift Report knows the station by.
+    """
+    for candidate in (override, os.environ.get("RF_STATION"), read_station_name()):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return socket.gethostname()
 
 
 def code_ops(stats):
@@ -444,7 +487,7 @@ def code_ops(stats):
     return ops
 
 
-def build_code_payload(stats, target_date, host, mode):
+def build_code_payload(stats, target_date, host):
     """The tracker's import envelope, carrying this one station's run.
 
     Shaped as a list of stations even though a run only ever produces one, so a
@@ -454,7 +497,7 @@ def build_code_payload(stats, target_date, host, mode):
         "v": 1,
         "type": "shift-import",
         "date": (target_date or date.today()).isoformat(),
-        "stations": [{"mode": mode, "host": host, "ops": code_ops(stats)}],
+        "stations": [{"mode": CODE_MODE, "host": host, "ops": code_ops(stats)}],
     }
 
 
@@ -467,8 +510,7 @@ def encode_code(payload):
 def code_summary(payload):
     """One-line human check of what a code holds, so it can be confirmed before pasting."""
     station = payload["stations"][0]
-    return (f"{station['host']}  {station['mode']}  {payload['date']}  "
-            f"{len(station['ops'])} operator(s)")
+    return f"{station['host']}  {payload['date']}  {len(station['ops'])} operator(s)"
 
 
 CLIPBOARD_COMMANDS = [
@@ -546,13 +588,11 @@ def main():
                               "table, so a station's numbers never have to be retyped. Covers today "
                               "unless -t says otherwise.")
     parser.add_argument("--name", metavar="NAME", default=None,
-                         help=f"Station name carried in --code (default: this machine's hostname, "
-                              f"{socket.gethostname()!r}). Set it to the label the Shift Report uses "
-                              "for this station so the code lands on it automatically.")
-    parser.add_argument("--mode", choices=CODE_MODES, default="gello",
-                         help="Which station block --code targets: 'gello' (default) or 'inference'.")
-    parser.add_argument("-i", dest="mode", action="store_const", const="inference",
-                         help="Shorthand for --mode inference.")
+                         help="Station name carried in --code, and remembered in "
+                              f"{STATION_FILE} for later runs -- set it once per station, to the "
+                              "label the Shift Report uses, and the code routes itself. Without it: "
+                              f"$RF_STATION, then the saved name, then the hostname "
+                              f"({socket.gethostname()!r}).")
     args = parser.parse_args()
     level = min(args.verbose, 2)
 
@@ -567,8 +607,13 @@ def main():
     stats = gather_stats(dirs, target_date, 0 if args.code else level)
 
     if args.code:
-        payload = build_code_payload(stats, target_date,
-                                     args.name or socket.gethostname(), args.mode)
+        # Naming a station is how you set one up, so the name sticks rather than
+        # having to be repeated on every run.
+        if args.name and args.name.strip() != (read_station_name() or ""):
+            if save_station_name(args.name):
+                print(f"Saved station name {args.name.strip()!r} to {STATION_FILE}", file=sys.stderr)
+
+        payload = build_code_payload(stats, target_date, station_name(args.name))
         # Summary to stderr, code alone to stdout, so `stats.py --code | pbcopy` stays clean.
         print(code_summary(payload), file=sys.stderr)
         print(encode_code(payload))
@@ -768,9 +813,9 @@ def render_report(stdscr, lines, level):
 def tui_code(stdscr, scope, days_ago, code_state):
     """Show the pasteable Shift Report code for the current filters and offer to copy it.
 
-    code_state carries the station name and run mode between visits, so they are
-    set once per session rather than on every look. The scan runs at level 0 --
-    one row per operator, matching what a station block holds.
+    The station name is asked for once and written to ~/.rf-station, so the next
+    run on this machine already knows it. The scan runs at level 0 -- one row per
+    operator, matching what a station block holds.
     """
     stdscr.erase()
     _addstr(stdscr, 0, 2, "Building code...", curses.A_DIM)
@@ -781,7 +826,7 @@ def tui_code(stdscr, scope, days_ago, code_state):
     status = ""
 
     while True:
-        payload = build_code_payload(stats, target_date, code_state["name"], code_state["mode"])
+        payload = build_code_payload(stats, target_date, code_state["name"])
         code = encode_code(payload)
 
         stdscr.erase()
@@ -797,7 +842,7 @@ def tui_code(stdscr, scope, days_ago, code_state):
             row += 1
         if status:
             _addstr(stdscr, min(row + 1, h - 3), 2, status[:width], curses.A_DIM)
-        _addstr(stdscr, h - 1, 2, "c copy   n name   i toggle mode   q back"[:width], curses.A_DIM)
+        _addstr(stdscr, h - 1, 2, "c copy   n name   q back"[:width], curses.A_DIM)
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -807,13 +852,12 @@ def tui_code(stdscr, scope, days_ago, code_state):
             status = (f"Copied to the clipboard with {tool}." if tool else
                       "No clipboard tool found -- select the code above to copy it.")
         elif ch == "n":
-            code_state["name"] = curses_prompt_str(
-                stdscr, "Station name (as labelled in the Shift Report)",
-                default=code_state["name"])
-            status = ""
-        elif ch == "i":
-            code_state["mode"] = "inference" if code_state["mode"] == "gello" else "gello"
-            status = ""
+            name = curses_prompt_str(stdscr, "Station name (as labelled in the Shift Report)",
+                                     default=code_state["name"])
+            code_state["name"] = name
+            status = (f"Saved as the station name for this machine ({STATION_FILE})."
+                      if save_station_name(name) else
+                      f"Using {name} for now -- {STATION_FILE} could not be written.")
         else:
             return
 
@@ -827,7 +871,7 @@ def tui_results(stdscr, scope, days_ago):
     Press s to change the When?/Which data? settings without restarting.
     Press c for the pasteable Shift Report code covering the same filters."""
     level = 0
-    code_state = {"name": socket.gethostname(), "mode": "gello"}
+    code_state = {"name": station_name()}
     while True:
         stdscr.erase()
         _addstr(stdscr, 0, 2, "Refreshing...", curses.A_DIM)

@@ -25,20 +25,34 @@ live progress board while a station records.
 never have to be retyped into the rf-admin Shift Report:
 
 ```
-python3 stats.py --code --name UR1            # today, GELLO mode
-python3 stats.py --code --name UR1 -i         # inference mode
-python3 stats.py --code --name UR1 -t 1       # yesterday
-python3 stats.py --code --name UR1 | pbcopy   # straight to the clipboard
+python3 stats.py --code --name UR1   # names this station, and remembers it
+python3 stats.py --code              # every run after — today's numbers
+python3 stats.py --code -t 1         # yesterday
+python3 stats.py --code | pbcopy     # straight to the clipboard
 ```
 
-The code goes to stdout and a one-line check — station, mode, date, operator
-count — to stderr, so piping stays clean. It covers **today** unless `-t` says
-otherwise, since a code stands for one day's report.
+The code goes to stdout and a one-line check — station, date, operator count —
+to stderr, so piping stays clean. It covers **today** unless `-t` says otherwise,
+since a code stands for one day's report.
 
-`--name` defaults to the machine's hostname; set it to the label the Shift
-Report uses for that station and the code routes itself to the right block. The
-TUI has the same thing on `c`: `n` renames, `i` toggles GELLO/inference, and `c`
-copies via `pbcopy`, `wl-copy`, `xclip`, or `xsel`.
+The TUI has the same thing on `c`: `n` sets the station name, `c` copies via
+`pbcopy`, `wl-copy`, `xclip`, or `xsel`.
+
+### Naming a station once
+
+`--name` writes the name to `~/.rf-station`, so it only has to be given the first
+time on a machine. Set it to the label the Shift Report uses for that station and
+every later code routes itself to the right block.
+
+The name is resolved most-explicit-first:
+
+1. `--name NAME` on the command line — and this is what saves it
+2. `$RF_STATION` — a one-off override that does **not** overwrite the saved name
+3. `~/.rf-station` — what was saved earlier
+4. the machine's hostname, as a last resort
+
+Setting the name in the TUI (`c` then `n`) saves it the same way. If the file
+can't be written, the name still applies to the run in hand.
 
 The paste box on the other end lives in the rf-admin repo, documented in
 `docs/station-stats-code.md`.
