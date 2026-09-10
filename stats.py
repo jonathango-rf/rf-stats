@@ -12,6 +12,7 @@ import socket
 import struct
 import subprocess
 import sys
+import urllib.parse
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 
@@ -1017,6 +1018,20 @@ QR_ANSI_DARK_ON_LIGHT = "\x1b[30;47m"
 QR_ANSI_RESET = "\x1b[0m"
 
 
+def sms_uri(code, number=""):
+    """A message-composing link, for a QR code a phone camera will actually act on.
+
+    A bare code scans as plain text, which iOS decodes and then discards -- the camera
+    says "no usable data" and there is nothing to copy. Wrapped like this it opens the
+    messaging app with the code already in the body instead.
+
+    The `?&` is deliberate: iOS reads the body from `&body=`, Android from `?body=`,
+    and this one spelling satisfies both. The number is optional -- without it the
+    message opens with no recipient, to be chosen on the phone.
+    """
+    return f"sms:{number}?&body={urllib.parse.quote(code, safe='')}"
+
+
 def print_qr(text, stream=sys.stdout):
     """Draw text as a QR code, forcing its own colours rather than the terminal's."""
     for line in qr_lines(text):
@@ -1076,6 +1091,10 @@ def main():
                          help="Draw the code as a QR code as well, to scan off the station "
                               "screen with a phone instead of copying it off the PC. Implies "
                               "--code.")
+    parser.add_argument("--sms", metavar="NUMBER", default=None,
+                         help="Address the QR code's message to a number, so scanning it "
+                              "opens a message already written and addressed. Without it the "
+                              "recipient is chosen on the phone.")
     parser.add_argument("--name", metavar="NAME", default=None,
                          help="Station name carried in --code, and remembered in "
                               f"{STATION_FILE} for later runs -- set it once per station, to the "
@@ -1111,7 +1130,7 @@ def main():
         print(code_summary(payload), file=sys.stderr)
         if args.qr:
             try:
-                print_qr(text)
+                print_qr(sms_uri(text, args.sms or ""))
             except ValueError as e:
                 print(f"Too many operators to fit a QR code ({e}) -- copy the line instead.",
                       file=sys.stderr)
@@ -1320,7 +1339,7 @@ def tui_qr(stdscr, code):
     code says so instead of showing a clipped one, which would scan as nothing.
     """
     try:
-        lines = qr_lines(code)
+        lines = qr_lines(sms_uri(code))
     except ValueError:
         lines = None
 
