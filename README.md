@@ -30,7 +30,7 @@ python3 stats.py --code              # every run after — today's numbers
 python3 stats.py --code -t 1         # yesterday
 python3 stats.py --code | pbcopy     # straight to the clipboard
 python3 stats.py --qr                # ... and draw it for a phone to scan
-python3 stats.py --qr --sms 5551234567   # ... already addressed to someone
+python3 stats.py --qr --email lead@example.com   # ... already addressed
 ```
 
 The code goes to stdout and a one-line check — station, date, operator count —
@@ -46,20 +46,18 @@ The clipboard only helps on the station PC. `--qr` draws the same code as a QR
 code so a phone camera can pick it up off the screen and carry it anywhere —
 whoever needs the numbers is rarely sitting at the station.
 
-Scanning it opens the phone's messaging app with the code already in the body,
-ready to be addressed and sent. `--sms NUMBER` fills the recipient in too.
+Scanning it opens the phone's mail app on a draft with the code already in the
+body and the station and date in the subject, ready to be addressed and sent.
+`--email ADDRESS` fills the recipient in too.
 
 That wrapping is not decoration. A bare code scans as plain text, which iOS
 decodes and then throws away — the camera says "no usable data" and leaves
 nothing to copy. Phone cameras only act on payloads they recognise, so the code
-travels as a message link:
+travels as a mail link:
 
 ```
-sms:?&body=RF2%3AAg0pAQADVVIxBAhKb25hdGhhbg...
+mailto:?subject=UR1%202026-09-09%20station%20stats&body=RF2%3AAg0pAQAD...
 ```
-
-The `?&` is deliberate: iOS reads the body from `&body=` and Android from
-`?body=`, and this one spelling satisfies both.
 
 The QR code is always drawn dark-on-light, whatever the terminal's colours are:
 inverted, most phones will not read it. A twelve-operator day needs a window
