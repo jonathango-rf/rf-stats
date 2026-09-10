@@ -29,6 +29,7 @@ python3 stats.py --code --name UR1   # names this station, and remembers it
 python3 stats.py --code              # every run after — today's numbers
 python3 stats.py --code -t 1         # yesterday
 python3 stats.py --code | pbcopy     # straight to the clipboard
+python3 stats.py --qr                # ... and draw it for a phone to scan
 ```
 
 The code goes to stdout and a one-line check — station, date, operator count —
@@ -36,7 +37,18 @@ to stderr, so piping stays clean. It covers **today** unless `-t` says otherwise
 since a code stands for one day's report.
 
 The TUI has the same thing on `c`: `n` sets the station name, `c` copies via
-`pbcopy`, `wl-copy`, `xclip`, or `xsel`.
+`pbcopy`, `wl-copy`, `xclip`, or `xsel`, and `p` fills the screen with the QR code.
+
+### Getting the code onto a phone
+
+The clipboard only helps on the station PC. `--qr` draws the same code as a QR
+code so a phone camera can pick it up off the screen and carry it anywhere —
+whoever needs the numbers is rarely sitting at the station.
+
+The QR code is always drawn dark-on-light, whatever the terminal's colours are:
+inverted, most phones will not read it. A twelve-operator day needs a window
+about 70 columns by 36 rows; below that the TUI says so rather than showing a
+clipped code that would scan as nothing.
 
 ### Naming a station once
 
@@ -56,6 +68,17 @@ can't be written, the name still applies to the run in hand.
 
 The paste box on the other end lives in the rf-admin repo, documented in
 `docs/station-stats-code.md`.
+
+### Code format
+
+Codes are `RF2:` followed by base64url over a packed binary body. The earlier
+`RF1:` codes spelled the same numbers out as JSON, which ran past a thousand
+characters on a busy day — far too dense to scan. RF2 is about five times
+shorter and carries exactly the same numbers.
+
+**A station on RF2 needs a Shift Report that understands it**, so deploy the
+tracker first. The tracker still accepts `RF1:` codes, so stations can be updated
+one at a time.
 
 ## Fixtures
 
