@@ -30,7 +30,7 @@ python3 stats.py --code              # every run after — today's numbers
 python3 stats.py --code -t 1         # yesterday
 python3 stats.py --code | pbcopy     # straight to the clipboard
 python3 stats.py --qr                # ... and draw it for a phone to scan
-python3 stats.py --qr --email lead@example.com   # ... already addressed
+python3 stats.py --qr --email someone@else.com   # ... to someone else
 ```
 
 The code goes to stdout and a one-line check — station, date, operator count —
@@ -46,9 +46,10 @@ The clipboard only helps on the station PC. `--qr` draws the same code as a QR
 code so a phone camera can pick it up off the screen and carry it anywhere —
 whoever needs the numbers is rarely sitting at the station.
 
-Scanning it opens the phone's mail app on a draft with the code already in the
-body and the station and date in the subject, ready to be addressed and sent.
-`--email ADDRESS` fills the recipient in too.
+Scanning it opens the phone's mail app on a draft that is already addressed,
+subject-lined with the station and date, and carrying the code in the body —
+nothing left but to send it. `--email ADDRESS` redirects it for one run, and
+`--email ""` leaves the recipient to be chosen on the phone.
 
 That wrapping is not decoration. A bare code scans as plain text, which iOS
 decodes and then throws away — the camera says "no usable data" and leaves

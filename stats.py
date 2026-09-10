@@ -1018,21 +1018,26 @@ QR_ANSI_DARK_ON_LIGHT = "\x1b[30;47m"
 QR_ANSI_RESET = "\x1b[0m"
 
 
+# Where a scanned QR code addresses its draft. --email overrides it for one run, and
+# --email "" leaves the draft unaddressed.
+CODE_EMAIL = "jonathan.g@roboforce.ai"
+
+
 def code_subject(payload):
     """A subject line for the QR code's draft, so the mail is identifiable in a list."""
     station = payload["stations"][0]
     return f"{station['host']} {payload['date']} station stats"
 
 
-def mailto_uri(code, address="", subject=""):
+def mailto_uri(code, address=CODE_EMAIL, subject=""):
     """A mail-composing link, for a QR code a phone camera will actually act on.
 
     A bare code scans as plain text, which iOS decodes and then discards -- the camera
     says "no usable data" and there is nothing left to copy. Wrapped like this it opens
     the mail app with the code already in the body instead.
 
-    Both the address and the subject are optional; without them the draft opens for
-    them to be filled in on the phone.
+    The subject is optional, and so is the address -- passing an empty one leaves the
+    draft for a recipient to be chosen on the phone.
     """
     fields = ""
     if subject:
@@ -1101,9 +1106,9 @@ def main():
                               "screen with a phone instead of copying it off the PC. Implies "
                               "--code.")
     parser.add_argument("--email", metavar="ADDRESS", default=None,
-                         help="Address the QR code's draft to someone, so scanning it opens "
-                              "mail already written and addressed. Without it the recipient "
-                              "is filled in on the phone.")
+                         help="Who the QR code's draft is addressed to. Defaults to "
+                              f"{CODE_EMAIL}; pass an empty address to leave the draft for a "
+                              "recipient to be chosen on the phone.")
     parser.add_argument("--name", metavar="NAME", default=None,
                          help="Station name carried in --code, and remembered in "
                               f"{STATION_FILE} for later runs -- set it once per station, to the "
@@ -1139,7 +1144,8 @@ def main():
         print(code_summary(payload), file=sys.stderr)
         if args.qr:
             try:
-                print_qr(mailto_uri(text, args.email or "", code_subject(payload)))
+                address = CODE_EMAIL if args.email is None else args.email
+                print_qr(mailto_uri(text, address, code_subject(payload)))
             except ValueError as e:
                 print(f"Too many operators to fit a QR code ({e}) -- copy the line instead.",
                       file=sys.stderr)
