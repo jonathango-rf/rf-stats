@@ -12,6 +12,7 @@ import socket
 import struct
 import subprocess
 import sys
+import time
 import urllib.parse
 from datetime import datetime, date, timedelta
 from collections import defaultdict
@@ -1324,6 +1325,9 @@ def tui_wizard(stdscr, initial_scope=None, initial_days_ago=0):
     return scope, days_ago
 
 
+# How long the results screen sits before re-scanning on its own.
+REFRESH_SECONDS = 60
+
 BREAKDOWN_HINTS = {
     0: "v split by task type",
     1: "v add event breakdown",
@@ -1338,7 +1342,8 @@ def render_report(stdscr, lines, level):
         if i >= h - 2:
             break
         _addstr(stdscr, i, 2, line[:max(w - 4, 0)])
-    footer = f"enter refresh   {BREAKDOWN_HINTS[level]}   c code   s settings   q quit"
+    footer = (f"enter refresh (auto every {REFRESH_SECONDS}s)   {BREAKDOWN_HINTS[level]}   "
+              "c code   s settings   q quit")
     _addstr(stdscr, h - 1, 2, footer[:max(w - 4, 0)], curses.A_DIM)
     stdscr.refresh()
 
@@ -1433,8 +1438,9 @@ def tui_code(stdscr, scope, days_ago, code_state):
 
 
 def tui_results(stdscr, scope, days_ago):
-    """Show the report and keep the TUI open, re-scanning every time Enter is pressed --
-    so an operator can leave it up while a session records and check progress live.
+    """Show the report and keep the TUI open, re-scanning every REFRESH_SECONDS and
+    every time Enter is pressed -- so an operator can leave it up while a session
+    records and check progress live.
     Press v to cycle the breakdown: operator only -> + task type -> + event object
     (task/part) -> back to operator only. Levels above the first also show each row's
     average session score.
@@ -1442,10 +1448,15 @@ def tui_results(stdscr, scope, days_ago):
     Press c for the pasteable Shift Report code covering the same filters."""
     level = 0
     code_state = {"name": station_name()}
+    timed_out = False
     while True:
-        stdscr.erase()
-        _addstr(stdscr, 0, 2, "Refreshing...", curses.A_DIM)
-        stdscr.refresh()
+        # A refresh nobody asked for leaves the old report up while it scans, so a
+        # board left on a wall does not blank out once a minute.
+        if not timed_out:
+            stdscr.erase()
+            _addstr(stdscr, 0, 2, "Refreshing...", curses.A_DIM)
+            stdscr.refresh()
+        timed_out = False
 
         dirs = dirs_for(scope)
         target_date = date.today() - timedelta(days=days_ago) if days_ago is not None else None
@@ -1454,9 +1465,19 @@ def tui_results(stdscr, scope, days_ago):
         lines = format_report(stats, filter_desc, level)
         lines += ["", f"Last checked: {datetime.now():%H:%M:%S}"]
 
+        # Counted from the scan, not from the last keypress, so a resize or a stray
+        # key does not push the next refresh back.
+        deadline = time.monotonic() + REFRESH_SECONDS
         while True:
             render_report(stdscr, lines, level)
+            # Wait for a key only until the refresh is due, then go back to blocking:
+            # the screens opened from here wait on a key for as long as it takes.
+            stdscr.timeout(max(0, int((deadline - time.monotonic()) * 1000)))
             key = stdscr.getch()
+            stdscr.timeout(-1)
+            if key == -1:
+                timed_out = True
+                break  # refresh on its own
             ch = key_char(key)
             if key in (curses.KEY_ENTER, 10, 13):
                 break  # refresh
@@ -1465,7 +1486,7 @@ def tui_results(stdscr, scope, days_ago):
                 break  # re-gather at the new breakdown level
             if ch == "c":
                 tui_code(stdscr, scope, days_ago, code_state)
-                continue  # back to the report, unchanged
+                continue  # back to the report, refreshing at once if it came due meanwhile
             if ch == "s":
                 new_settings = tui_wizard(stdscr, initial_scope=scope, initial_days_ago=days_ago)
                 if new_settings is not None:
