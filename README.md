@@ -16,7 +16,7 @@ Stdlib only — no install, no virtualenv. Durations prefer MCAP timestamps,
 falling back to `realsense_log.csv` and then head-image count, so a session
 missing one source still reports.
 
-The interactive TUI stays open and re-scans every 60 seconds, or at once on
+The interactive TUI stays open and re-scans every 10 seconds, or at once on
 Enter, which makes it usable as a live progress board while a station records.
 
 ## Handing numbers to the Shift Report

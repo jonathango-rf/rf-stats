@@ -1326,7 +1326,7 @@ def tui_wizard(stdscr, initial_scope=None, initial_days_ago=0):
 
 
 # How long the results screen sits before re-scanning on its own.
-REFRESH_SECONDS = 60
+REFRESH_SECONDS = 10
 
 BREAKDOWN_HINTS = {
     0: "v split by task type",
@@ -1451,7 +1451,7 @@ def tui_results(stdscr, scope, days_ago):
     timed_out = False
     while True:
         # A refresh nobody asked for leaves the old report up while it scans, so a
-        # board left on a wall does not blank out once a minute.
+        # board left on a wall does not blank out every few seconds.
         if not timed_out:
             stdscr.erase()
             _addstr(stdscr, 0, 2, "Refreshing...", curses.A_DIM)
