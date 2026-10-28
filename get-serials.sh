@@ -7,17 +7,21 @@
 #   - UR5E arms + control boxes       via Dashboard Server (TCP 29999)
 #   - gen.ai grippers                 via gen_con_sdk camera_cmd.py MCUID
 #   - Intel RealSense camera(s)        via rs-enumerate-devices
+#   - GELLO controllers (U2D2)         via udev USB properties
 #
 # Usage:
 #   ./get-serials.sh            print a human-readable report
 #   ./get-serials.sh -c         print CSV (device,label,field,value)
+#   ./get-serials.sh -t         print one tab-separated row for this station
+#                               (header + row; paste into a spreadsheet)
 #   ./get-serials.sh -h         show this help
 #
 # Notes:
 #   - Designed to run ON the Linux PC the hardware is attached to.
 #   - Unreachable devices are reported as UNREACHABLE, never fatal.
 #   - Some PC serials require root; run with sudo for complete DMI info.
-#   - Requires: bash 4+, python3 (grippers), rs-enumerate-devices (RealSense).
+#   - Requires: bash 4+, python3 (grippers), rs-enumerate-devices (RealSense),
+#     udevadm (GELLO).
 
 set -uo pipefail
 
@@ -36,6 +40,8 @@ GRIPPERS=(
 
 GRIPPER_CMD="python3 $HOME/Workspace/gen_con_sdk_python_release/scripts/camera_cmd.py"
 
+GELLO_USB_ID="0403:6014"   # ROBOTIS U2D2 (FTDI FT232H) driving the GELLO Dynamixels
+
 UR_DASHBOARD_PORT=29999
 NET_TIMEOUT=3          # seconds per network read
 # ================================================================
@@ -46,11 +52,14 @@ elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_CMD=gtimeout
 else TIMEOUT_CMD=""; fi
 
 CSV=false
+TABLE=false
+COLLECTED=""   # table mode: dev<TAB>label<TAB>field<TAB>value lines
 
 # ---- parse flags ----
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -c|--csv) CSV=true; shift ;;
+    -t|--table) CSV=true; TABLE=true; shift ;;   # CSV=true silences the human-only text
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
@@ -61,7 +70,9 @@ section() { $CSV || { echo; echo "== $1 =="; }; }
 # emit DEVICE LABEL FIELD VALUE
 emit() {
   local dev="$1" label="$2" field="$3" value="$4"
-  if $CSV; then
+  if $TABLE; then
+    COLLECTED+="$dev"$'\t'"$label"$'\t'"$field"$'\t'"${value//$'\t'/ }"$'\n'
+  elif $CSV; then
     printf '%s,%s,%s,%s\n' "$dev" "$label" "$field" "${value//,/;}"
   else
     printf '  %-14s %-18s %s\n' "$label" "$field" "$value"
@@ -185,11 +196,65 @@ report_realsense() {
   $found || emit realsense - status "no RealSense device detected"
 }
 
+# ============================ GELLO ============================
+report_gello() {
+  section "GELLO controllers (U2D2)"
+  if ! command -v udevadm >/dev/null 2>&1; then
+    emit gello - status "udevadm not available"
+    return
+  fi
+  local tty props serial found=false
+  prop() { echo "$props" | sed -n "s/^$1=//p" | head -n1; }
+  for tty in /dev/ttyUSB*; do
+    [[ -e "$tty" ]] || continue
+    props=$(udevadm info -q property -n "$tty" 2>/dev/null)
+    [[ "$(prop ID_VENDOR_ID):$(prop ID_MODEL_ID)" == "$GELLO_USB_ID" ]] || continue
+    found=true
+    serial=$(prop ID_SERIAL_SHORT)
+    emit gello "${tty#/dev/}" serial "${serial:-N/A}"
+    # Physical USB port path; shows which socket each GELLO is plugged into.
+    emit gello "${tty#/dev/}" usb_port "$(prop ID_PATH)"
+  done
+  $found || emit gello - status "not detected"
+}
+
+# ============================ table ============================
+# One cell: every matching field joined with "; ", else the device's status.
+cell() {  # $1 = dev, $2 = label ("*" for any), $3 = field
+  local v
+  v=$(awk -F'\t' -v d="$1" -v l="$2" -v f="$3" '
+    $1==d && (l=="*" || $2==l) && $3==f { out = out (out=="" ? "" : "; ") $4 }
+    END { print out }' <<<"$COLLECTED")
+  [[ -z "$v" && "$3" != status ]] && v=$(cell "$1" "$2" status)
+  printf '%s' "$v"
+}
+
+# Columns are fixed by CONFIG, so rows from every station line up.
+print_table() {
+  local entry label
+  local -a head=(date hostname pc_model pc_serial board_serial)
+  local -a row=("$(date '+%Y-%m-%d')" "$(cell PC '*' hostname)" "$(cell PC '*' model)"
+                "$(cell PC '*' system_serial)" "$(cell PC '*' board_serial)")
+  for entry in "${ROBOTS[@]}"; do
+    label="${entry%%|*}"
+    head+=("ur_${label}_serial"); row+=("$(cell UR5E "$label" robot_serial)")
+  done
+  for entry in "${GRIPPERS[@]}"; do
+    label="${entry%%|*}"
+    head+=("gripper_${label}_mcuid"); row+=("$(cell gripper "$label" mcuid)")
+  done
+  head+=(realsense_serials gello_serials)
+  row+=("$(cell realsense '*' serial)" "$(cell gello '*' serial)")
+  (IFS=$'\t'; echo "${head[*]}"; echo "${row[*]}")
+}
+
 # ============================ main ============================
-$CSV && echo "device,label,field,value"
+$CSV && ! $TABLE && echo "device,label,field,value"
 $CSV || echo "Hardware serial inventory  ($(date '+%Y-%m-%d %H:%M:%S'))"
 report_pc
 report_robots
 report_grippers
 report_realsense
+report_gello
+$TABLE && print_table
 $CSV || echo
