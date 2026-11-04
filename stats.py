@@ -282,15 +282,21 @@ def event_label(data):
 
 
 def iter_sessions(dirs, target_date):
-    """Yield (operator, task_type_or_None, event_label_or_None, duration, score_or_None)
-    for every matching session. score is None unless the session has a session_score.json."""
+    """Yield (operator, task_type_or_None, event_label_or_None, duration, score_or_None, mtime)
+    for every matching session. score is None unless the session has a session_score.json;
+    mtime is session_meta.json's, the same stamp the date filter goes by."""
     for d in dirs:
         for parent in sorted(glob.glob(os.path.join(d, "*"))):
             for path, duration in classify_session(parent):
                 if os.path.basename(os.path.dirname(path)).endswith("_mpeg"):
                     continue
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError as e:
+                    print(f"Skipping {path}: {e}")
+                    continue
                 if target_date is not None:
-                    session_date = date.fromtimestamp(os.path.getmtime(path))
+                    session_date = date.fromtimestamp(mtime)
                     if session_date != target_date:
                         continue
                 try:
@@ -301,15 +307,16 @@ def iter_sessions(dirs, target_date):
                     continue
 
                 yield (data.get("operator_name", "UNKNOWN"), data.get("task_type") or None,
-                       event_label(data), duration, session_score(os.path.dirname(path)))
+                       event_label(data), duration, session_score(os.path.dirname(path)), mtime)
 
 
 def gather_stats(dirs, target_date, level=0):
-    """Tally session stats at one of three breakdown levels:
+    """Tally session stats at one of four breakdown levels:
 
       0 -- by operator
       1 -- by operator + task type
       2 -- by operator + task type + event object
+      3 -- grouped as level 2; the report adds each row's last session duration
 
     "-" stands in for a task type or event object a session doesn't carry. Rows group
     case-insensitively, so "Jonathan" and "jonathan" -- or "Tool_Box" and "tool_box" --
@@ -317,9 +324,10 @@ def gather_stats(dirs, target_date, level=0):
 
     Only sessions that actually have a score contribute to "scores" -- an unscored session
     is left out of the list entirely rather than counted as a zero."""
-    stats = defaultdict(lambda: {"total": 0, "durations": [], "scores": [], "label": None})
+    stats = defaultdict(lambda: {"total": 0, "durations": [], "scores": [], "label": None,
+                                 "last": None, "last_duration": None})
 
-    for operator, task_type, event, duration, score in iter_sessions(dirs, target_date):
+    for operator, task_type, event, duration, score, mtime in iter_sessions(dirs, target_date):
         label = (operator,)
         if level >= 1:
             label += (task_type or "-",)
@@ -334,6 +342,9 @@ def gather_stats(dirs, target_date, level=0):
             s["durations"].append(duration)
         if score is not None:
             s["scores"].append(score)
+        if s["last"] is None or mtime > s["last"]:
+            s["last"] = mtime
+            s["last_duration"] = duration
 
     return stats
 
@@ -344,11 +355,16 @@ def fmt_score(scores):
     return f"{sum(scores) / len(scores):.2f}" if scores else "-"
 
 
+def fmt_last(duration):
+    return fmt_seconds(duration) if duration is not None else "-"
+
+
 def format_report(stats, filter_desc=None, level=0):
     """Render a stats report as a list of lines, for printing or for curses.
 
     level mirrors gather_stats: 0 shows operators only, 1 adds a Task column, 2 adds
-    Event as well. Avg Score rides along from level 1 up. Rows sort by their grouping
+    Event as well. Avg Score rides along from level 1 up, and level 3 adds Last Time,
+    the duration of the newest session in each row. Rows sort by their grouping
     key (already lowercased), so ordering ignores case too.
     """
     lines = [f"Report generated: {datetime.now():%Y-%m-%d %H:%M:%S}"]
@@ -368,8 +384,9 @@ def format_report(stats, filter_desc=None, level=0):
     avg_w = max(len("Avg Time"), 10)
     data_w = max(len("Total Data Time"), 15)
     score_w = len("Avg Score")
+    last_w = max(len("Last Time"), 10)
 
-    def row(name, task, event, total, avg, data, score):
+    def row(name, task, event, total, avg, data, score, last=""):
         cols = f"{name:<{name_w}}"
         if level >= 1:
             cols += f"  {task:<{task_w}}"
@@ -378,9 +395,12 @@ def format_report(stats, filter_desc=None, level=0):
         cols += f"  {total:>6}  {avg:>{avg_w}}  {data:>{data_w}}"
         if level >= 1:
             cols += f"  {score:>{score_w}}"
+        if level >= 3:
+            cols += f"  {last:>{last_w}}"
         return cols
 
-    header = row("Operator", "Task", "Event", "Total", "Avg Time", "Total Data Time", "Avg Score")
+    header = row("Operator", "Task", "Event", "Total", "Avg Time", "Total Data Time", "Avg Score",
+                 "Last Time")
     lines.append(header)
     lines.append("-" * len(header))
 
@@ -394,7 +414,8 @@ def format_report(stats, filter_desc=None, level=0):
             avg_str = data_str = "-"
 
         name, task, event = (s["label"] + ("", ""))[:3]
-        lines.append(row(name, task, event, s["total"], avg_str, data_str, fmt_score(s["scores"])))
+        lines.append(row(name, task, event, s["total"], avg_str, data_str, fmt_score(s["scores"]),
+                         fmt_last(s["last_duration"])))
 
     all_durations = [d for s in stats.values() for d in s["durations"]]
     if all_durations:
@@ -406,7 +427,8 @@ def format_report(stats, filter_desc=None, level=0):
 
     lines.append("-" * len(header))
     lines.append(row("TOTAL", "", "", sum(s["total"] for s in stats.values()),
-                     total_avg_str, total_data_str, fmt_score(all_scores)))
+                     total_avg_str, total_data_str, fmt_score(all_scores),
+                     fmt_last(max(stats.values(), key=lambda s: s["last"])["last_duration"])))
     return lines
 
 
@@ -1097,7 +1119,8 @@ def main():
     parser.add_argument("-v", "--verbose", action="count", default=0,
                          help="Break sessions down further than operator, and show each row's average "
                               "session score. -v splits by task type; -vv also splits by event object "
-                              "(task/part). Sessions missing a task type or event object show '-' for it.")
+                              "(task/part); -vvv adds each row's last session duration. Sessions missing a task "
+                              "type or event object show '-' for it.")
     parser.add_argument("--code", "--hash", dest="code", action="store_true",
                          help="Print one pasteable line for the rf-admin Shift Report instead of the "
                               "table, so a station's numbers never have to be retyped. Covers today "
@@ -1117,7 +1140,7 @@ def main():
                               f"$RF_STATION, then the saved name, then the hostname "
                               f"({socket.gethostname()!r}).")
     args = parser.parse_args()
-    level = min(args.verbose, 2)
+    level = min(args.verbose, 3)
     # A QR code is just another way of handing over the same code, so it brings the
     # rest of code mode with it -- today by default, one row per operator.
     code = args.code or args.qr
@@ -1331,7 +1354,8 @@ REFRESH_SECONDS = 10
 BREAKDOWN_HINTS = {
     0: "v split by task type",
     1: "v add event breakdown",
-    2: "v hide breakdown",
+    2: "v add last duration",
+    3: "v hide breakdown",
 }
 
 

@@ -9,6 +9,7 @@ python3 stats.py                  # interactive menu (no arguments)
 python3 stats.py -t 0             # today, per operator
 python3 stats.py -t 0 -v          # split by task type, with average scores
 python3 stats.py -t 0 -vv         # ... and by event object
+python3 stats.py -t 0 -vvv        # ... plus each row's last session duration
 python3 stats.py -d local         # scan the dev-machine copy of core-apps
 ```
 
