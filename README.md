@@ -19,6 +19,11 @@ missing one source still reports.
 
 The interactive TUI stays open and re-scans every 10 seconds, or at once on
 Enter, which makes it usable as a live progress board while a station records.
+Press `s` there for one settings page: time, data folder, which `session_meta.json`
+fields to group by (rows group in the order you tick them), the Score and
+Last columns, and the station name. Settings are saved to `~/.rf-stats.json`
+and preselected next launch. Press `c` for the Shift Report code as a QR code,
+with the code text printed under it.
 
 ## Handing numbers to the Shift Report
 

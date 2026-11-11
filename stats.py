@@ -281,10 +281,40 @@ def event_label(data):
     return None
 
 
+def meta_value(data, field):
+    """One session_meta.json field as a row label, or None if absent/empty.
+
+    Lists of plain values join with "+" like event_object does; nested objects
+    (layout, camera_fps, ...) can't label a row, so they count as absent."""
+    value = data.get(field)
+    if isinstance(value, list):
+        value = [str(x) for x in value if x not in (None, "") and not isinstance(x, (dict, list))]
+        return "+".join(value) or None
+    if value is None or value == "" or isinstance(value, dict):
+        return None
+    return str(value)
+
+
+def scan_meta_fields(dirs, target_date):
+    """Return ([(field, sessions_with_it)], session_count) over every session the report
+    would count. Fields keep the order they first appear in; sessions from different
+    recorders (GELLO, MCAP, ...) carry different fields, so a count below the session
+    count marks a field only some sessions have."""
+    counts = {}
+    total = 0
+    for *_, data in iter_sessions(dirs, target_date):
+        total += 1
+        for field in data:
+            if meta_value(data, field) is not None:
+                counts[field] = counts.get(field, 0) + 1
+    return list(counts.items()), total
+
+
 def iter_sessions(dirs, target_date):
-    """Yield (operator, task_type_or_None, event_label_or_None, duration, score_or_None, mtime)
-    for every matching session. score is None unless the session has a session_score.json;
-    mtime is session_meta.json's, the same stamp the date filter goes by."""
+    """Yield (operator, task_type_or_None, event_label_or_None, duration, score_or_None, mtime,
+    meta) for every matching session. score is None unless the session has a session_score.json;
+    mtime is session_meta.json's, the same stamp the date filter goes by; meta is the parsed
+    session_meta.json."""
     for d in dirs:
         for parent in sorted(glob.glob(os.path.join(d, "*"))):
             for path, duration in classify_session(parent):
@@ -307,10 +337,10 @@ def iter_sessions(dirs, target_date):
                     continue
 
                 yield (data.get("operator_name", "UNKNOWN"), data.get("task_type") or None,
-                       event_label(data), duration, session_score(os.path.dirname(path)), mtime)
+                       event_label(data), duration, session_score(os.path.dirname(path)), mtime, data)
 
 
-def gather_stats(dirs, target_date, level=0):
+def gather_stats(dirs, target_date, level=0, fields=None):
     """Tally session stats at one of four breakdown levels:
 
       0 -- by operator
@@ -322,17 +352,23 @@ def gather_stats(dirs, target_date, level=0):
     case-insensitively, so "Jonathan" and "jonathan" -- or "Tool_Box" and "tool_box" --
     land in the same row; the first spelling seen becomes that row's display label.
 
+    fields, when given, overrides level: rows group by those session_meta.json fields, in
+    that order, with "-" for a field a session doesn't carry.
+
     Only sessions that actually have a score contribute to "scores" -- an unscored session
     is left out of the list entirely rather than counted as a zero."""
     stats = defaultdict(lambda: {"total": 0, "durations": [], "scores": [], "label": None,
                                  "last": None, "last_duration": None})
 
-    for operator, task_type, event, duration, score, mtime in iter_sessions(dirs, target_date):
-        label = (operator,)
-        if level >= 1:
-            label += (task_type or "-",)
-        if level >= 2:
-            label += (event or "-",)
+    for operator, task_type, event, duration, score, mtime, data in iter_sessions(dirs, target_date):
+        if fields:
+            label = tuple(meta_value(data, f) or "-" for f in fields)
+        else:
+            label = (operator,)
+            if level >= 1:
+                label += (task_type or "-",)
+            if level >= 2:
+                label += (event or "-",)
 
         s = stats[tuple(p.lower() for p in label)]
         if s["label"] is None:
@@ -359,13 +395,15 @@ def fmt_last(duration):
     return fmt_seconds(duration) if duration is not None else "-"
 
 
-def format_report(stats, filter_desc=None, level=0):
+def format_report(stats, filter_desc=None, level=0, fields=None, score=None, last=None):
     """Render a stats report as a list of lines, for printing or for curses.
 
     level mirrors gather_stats: 0 shows operators only, 1 adds a Task column, 2 adds
-    Event as well. Avg Score rides along from level 1 up, and level 3 adds Last Time,
-    the duration of the newest session in each row. Rows sort by their grouping
-    key (already lowercased), so ordering ignores case too.
+    Event as well. Score rides along from level 1 up, and level 3 adds Last,
+    the duration of the newest session in each row. fields, as in gather_stats,
+    replaces those key columns with one per field and always shows Score and
+    Last. score/last, when given, force those two columns on or off. Rows sort by
+    their grouping key (already lowercased), so ordering ignores case too.
     """
     lines = [f"Report generated: {datetime.now():%Y-%m-%d %H:%M:%S}"]
     if filter_desc:
@@ -376,31 +414,32 @@ def format_report(stats, filter_desc=None, level=0):
         lines.append("No session_meta.json files found.")
         return lines
 
+    if fields:
+        keys = list(fields)
+    else:
+        keys = ["Operator", "Task", "Event"][:min(level, 2) + 1]
+    show_score = (bool(fields) or level >= 1) if score is None else score
+    show_last = (bool(fields) or level >= 3) if last is None else last
+
     labels = [s["label"] for s in stats.values()]
-    name_w = max(len("Operator"), len("TOTAL"), *(len(l[0]) for l in labels))
-    task_w = max(len("Task"), *(len(l[1]) for l in labels)) if level >= 1 else 0
-    event_w = max(len("Event"), *(len(l[2]) for l in labels)) if level >= 2 else 0
+    key_ws = [max(len(k), *(len(l[i]) for l in labels)) for i, k in enumerate(keys)]
+    key_ws[0] = max(key_ws[0], len("TOTAL"))
 
-    avg_w = max(len("Avg Time"), 10)
-    data_w = max(len("Total Data Time"), 15)
-    score_w = len("Avg Score")
-    last_w = max(len("Last Time"), 10)
+    avg_w = max(len("Avg"), 10)
+    data_w = max(len("Total"), 10)
+    score_w = max(len("Score"), 6)
+    last_w = max(len("Last"), 10)
 
-    def row(name, task, event, total, avg, data, score, last=""):
-        cols = f"{name:<{name_w}}"
-        if level >= 1:
-            cols += f"  {task:<{task_w}}"
-        if level >= 2:
-            cols += f"  {event:<{event_w}}"
+    def row(key, total, avg, data, score, last=""):
+        cols = "  ".join(f"{k:<{w}}" for k, w in zip(key, key_ws))
         cols += f"  {total:>6}  {avg:>{avg_w}}  {data:>{data_w}}"
-        if level >= 1:
+        if show_score:
             cols += f"  {score:>{score_w}}"
-        if level >= 3:
+        if show_last:
             cols += f"  {last:>{last_w}}"
         return cols
 
-    header = row("Operator", "Task", "Event", "Total", "Avg Time", "Total Data Time", "Avg Score",
-                 "Last Time")
+    header = row(keys, "#", "Avg", "Total", "Score", "Last")
     lines.append(header)
     lines.append("-" * len(header))
 
@@ -413,8 +452,7 @@ def format_report(stats, filter_desc=None, level=0):
         else:
             avg_str = data_str = "-"
 
-        name, task, event = (s["label"] + ("", ""))[:3]
-        lines.append(row(name, task, event, s["total"], avg_str, data_str, fmt_score(s["scores"]),
+        lines.append(row(s["label"], s["total"], avg_str, data_str, fmt_score(s["scores"]),
                          fmt_last(s["last_duration"])))
 
     all_durations = [d for s in stats.values() for d in s["durations"]]
@@ -426,7 +464,7 @@ def format_report(stats, filter_desc=None, level=0):
     all_scores = [x for s in stats.values() for x in s["scores"]]
 
     lines.append("-" * len(header))
-    lines.append(row("TOTAL", "", "", sum(s["total"] for s in stats.values()),
+    lines.append(row(["TOTAL"] + [""] * (len(keys) - 1), sum(s["total"] for s in stats.values()),
                      total_avg_str, total_data_str, fmt_score(all_scores),
                      fmt_last(max(stats.values(), key=lambda s: s["last"])["last_duration"])))
     return lines
@@ -1016,12 +1054,9 @@ QR_HALF_BLOCKS = {(0, 0): " ", (1, 0): "▀", (0, 1): "▄", (1, 1): "█"}
 QR_QUIET_ZONE = 4
 
 
-def qr_lines(text):
-    """Render text as QR code lines, dark modules drawn in the foreground colour.
-
-    The caller supplies the colours. They must be dark-on-light whatever the
-    terminal's own theme is: an inverted QR code is one many phones will not read.
-    """
+def qr_cells(text):
+    """The QR code, quiet zone included, as rows of (top, bottom) module pairs -- one
+    terminal cell holds two module rows, since a cell is about twice as tall as wide."""
     matrix = qr_matrix(text)
     size = len(matrix)
     width = size + 2 * QR_QUIET_ZONE
@@ -1031,13 +1066,27 @@ def qr_lines(text):
             + [blank] * QR_QUIET_ZONE)
     if len(rows) % 2:
         rows.append(blank)
-    return ["".join(QR_HALF_BLOCKS[(rows[i][c], rows[i + 1][c])] for c in range(width))
-            for i in range(0, len(rows), 2)]
+    return [[(rows[i][c], rows[i + 1][c]) for c in range(width)] for i in range(0, len(rows), 2)]
+
+
+def qr_lines(text):
+    """Render text as QR code lines, dark modules drawn in the foreground colour.
+
+    The caller supplies the colours. They must be dark-on-light whatever the
+    terminal's own theme is: an inverted QR code is one many phones will not read.
+    Only for a terminal without colour: block glyphs leave the line spacing blank, so
+    with any spacing the code comes out striped. qr_cells drawn in colour does not.
+    """
+    return ["".join(QR_HALF_BLOCKS[cell] for cell in row) for row in qr_cells(text)]
 
 
 # A QR code must be dark-on-light to scan, whatever the terminal's own theme is:
 # on a dark background the code comes out inverted and most phones refuse to read it.
-QR_ANSI_DARK_ON_LIGHT = "\x1b[30;47m"
+# Every cell is an upper half block: the top module in the foreground colour, the
+# bottom one in the background colour. Background fills the whole cell, line spacing
+# included, so a terminal with extra spacing shows no white stripes between rows.
+QR_ANSI_FG = {0: "97", 1: "30"}   # bright white, black
+QR_ANSI_BG = {0: "107", 1: "40"}
 QR_ANSI_RESET = "\x1b[0m"
 
 
@@ -1071,8 +1120,9 @@ def mailto_uri(code, address=CODE_EMAIL, subject=""):
 
 def print_qr(text, stream=sys.stdout):
     """Draw text as a QR code, forcing its own colours rather than the terminal's."""
-    for line in qr_lines(text):
-        print(f"{QR_ANSI_DARK_ON_LIGHT}{line}{QR_ANSI_RESET}", file=stream)
+    for row in qr_cells(text):
+        line = "".join(f"\x1b[{QR_ANSI_FG[top]};{QR_ANSI_BG[bottom]}m\u2580" for top, bottom in row)
+        print(line + QR_ANSI_RESET, file=stream)
 
 
 def capture_dirs(root):
@@ -1189,6 +1239,61 @@ def _addstr(stdscr, y, x, s, attr=curses.A_NORMAL):
         pass  # window too small for this line; skip rather than crash
 
 
+# Colour pairs, set up by init_colors. The QR code keeps its own black-on-white pair;
+# the rest draw on the terminal's own background, so dark and light themes both work.
+QR_COLOR_PAIR = 1      # black on white
+QR_INVERSE_PAIR = 5    # white on black
+ACCENT_PAIR = 2  # keys, titles, values, the selected row
+GOOD_PAIR = 3    # ticked boxes and fields, totals, the code summary
+WARN_PAIR = 4    # nothing found, window too small
+
+
+def init_colors():
+    if not curses.has_colors():
+        return
+    try:
+        curses.use_default_colors()
+        bg = -1
+    except curses.error:
+        bg = curses.COLOR_BLACK
+    # Bright white where the terminal has it: plain white is often a light grey.
+    white = 15 if curses.COLORS >= 16 else curses.COLOR_WHITE
+    curses.init_pair(QR_COLOR_PAIR, curses.COLOR_BLACK, white)
+    curses.init_pair(QR_INVERSE_PAIR, white, curses.COLOR_BLACK)
+    curses.init_pair(ACCENT_PAIR, curses.COLOR_CYAN, bg)
+    curses.init_pair(GOOD_PAIR, curses.COLOR_GREEN, bg)
+    curses.init_pair(WARN_PAIR, curses.COLOR_YELLOW, bg)
+
+
+def color(pair, extra=curses.A_NORMAL):
+    """A colour pair's attribute plus extra, or just extra on a terminal without colour."""
+    return (curses.color_pair(pair) if curses.has_colors() else curses.A_NORMAL) | extra
+
+
+def draw_segments(stdscr, y, x, segments, width):
+    """Draw [(text, attr)] left to right from x, trimmed to width columns in all."""
+    end = x + width
+    for text, attr in segments:
+        text = text[:max(end - x, 0)]
+        if text:
+            _addstr(stdscr, y, x, text, attr)
+            x += len(text)
+
+
+def draw_guide(stdscr, y, guide):
+    """Draw a key guide like "c copy   q back": each key in the accent colour, what
+    it does dimmed."""
+    segments = []
+    for i, part in enumerate(guide.split("   ")):
+        key, _, action = part.partition(" ")
+        if i:
+            segments.append(("   ", curses.A_NORMAL))
+        segments.append((key, color(ACCENT_PAIR, curses.A_BOLD)))
+        if action:
+            segments.append((" " + action, curses.A_DIM))
+    draw_segments(stdscr, y, 2, segments, max(stdscr.getmaxyx()[1] - 4, 0))
+
+
 def key_char(key):
     """Lowercased character for a keypress, or "" for keys that aren't characters.
     Lets V/Q/S/J/K work the same as v/q/s/j/k, e.g. with caps lock on."""
@@ -1198,30 +1303,36 @@ def key_char(key):
         return ""
 
 
-def curses_menu(stdscr, title, options, subtitle=None, default_index=0):
-    """Arrow-key menu. Returns the selected index, or None if the user quit (q/Esc)."""
+def curses_menu(stdscr, title, options, subtitle=None, default_index=0,
+                footer="up/down move   enter select   q cancel"):
+    """Arrow-key menu. Returns the selected index, or None if the user quit (q/Esc).
+    An option is a string, or a list of (text, attr) segments to colour parts of it."""
     curses.curs_set(0)
     idx = default_index if 0 <= default_index < len(options) else 0
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        _addstr(stdscr, 0, 2, title, curses.A_BOLD)
-        base_row = 2
+        draw_guide(stdscr, 0, footer)
+        _addstr(stdscr, 1, 2, title, color(ACCENT_PAIR, curses.A_BOLD))
+        base_row = 3
         if subtitle:
             max_w = max(w - 4, 0)
             # Long subtitles (e.g. a deep folder path) are trimmed from the left so the
             # most relevant part -- the tail -- stays visible instead of the root.
             sub = "..." + subtitle[-(max_w - 3):] if len(subtitle) > max_w > 3 else subtitle
-            _addstr(stdscr, 1, 2, sub[:max_w], curses.A_DIM)
-            base_row = 3
+            _addstr(stdscr, 2, 2, sub[:max_w], curses.A_DIM)
+            base_row = 4
         for i, opt in enumerate(options):
             row = base_row + i
-            if row >= h - 2:
+            if row >= h:
                 break
-            marker = "> " if i == idx else "  "
-            attr = curses.A_REVERSE if i == idx else curses.A_NORMAL
-            _addstr(stdscr, row, 2, (marker + opt)[:max(w - 4, 0)], attr)
-        _addstr(stdscr, h - 1, 2, "up/down move   enter select   q cancel"[:max(w - 4, 0)], curses.A_DIM)
+            segments = [(opt, curses.A_NORMAL)] if isinstance(opt, str) else opt
+            if i == idx:
+                text = "> " + "".join(t for t, _ in segments)
+                segments = [(text, color(ACCENT_PAIR, curses.A_BOLD | curses.A_REVERSE))]
+            else:
+                segments = [("  ", curses.A_NORMAL)] + segments
+            draw_segments(stdscr, row, 2, segments, max(w - 4, 0))
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -1243,8 +1354,8 @@ def curses_prompt_str(stdscr, prompt, default="", width=200):
     curses.echo()
     curses.curs_set(1)
     stdscr.erase()
-    _addstr(stdscr, 2, 2, prompt)
-    _addstr(stdscr, 4, 2, "> ")
+    _addstr(stdscr, 2, 2, prompt, color(ACCENT_PAIR, curses.A_BOLD))
+    _addstr(stdscr, 4, 2, "> ", color(ACCENT_PAIR))
     stdscr.refresh()
     try:
         raw = stdscr.getstr(4, 4, width).decode().strip()
@@ -1299,6 +1410,71 @@ def curses_browse_dir(stdscr, start):
             current = os.path.join(current, picked)
 
 
+def curses_pick_fields(stdscr, fields, total, chosen):
+    """Checklist of session_meta.json fields to group the report by.
+
+    fields is [(name, sessions_with_it)] from scan_meta_fields. Enter ticks a field and
+    numbers it in tick order -- the order rows group by; unticking renumbers the rest.
+    Enter on the "[ apply ]" row at the top returns the ordered field list ([] for the
+    preset breakdowns); q/Esc returns None.
+    """
+    curses.curs_set(0)
+    picked = list(chosen)
+    # A field ticked earlier but absent from this scan stays listed so it can be unticked.
+    fields = list(fields) + [(f, 0) for f in picked if f not in dict(fields)]
+    if not fields:
+        fields = [("operator_name", 0)]
+    rows = [None] + fields  # None is the apply row
+    idx, top = 1, 0
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        width = max(w - 4, 0)
+        draw_guide(stdscr, 0, "enter tick (or apply)   x clear   q cancel")
+        _addstr(stdscr, 1, 2, "robo-stats", color(ACCENT_PAIR, curses.A_BOLD))
+        _addstr(stdscr, 2, 2, f"Group by which fields? ({total} sessions scanned; "
+                              "numbers are grouping order)"[:width], curses.A_DIM)
+        visible = max(h - 4, 1)
+        top = min(max(top, idx - visible + 1), idx)
+        for i in range(top, min(top + visible, len(rows))):
+            if rows[i] is None:
+                line = f"[ apply ({len(picked)} ticked) ]"
+                attr = color(ACCENT_PAIR, curses.A_BOLD)
+            else:
+                name, count = rows[i]
+                mark = f"[{picked.index(name) + 1:>2}]" if name in picked else "[  ]"
+                line = f"{mark} {name}  ({count}/{total})"
+                if name in picked:
+                    attr = color(GOOD_PAIR, curses.A_BOLD)
+                elif count < total:
+                    attr = curses.A_DIM
+                else:
+                    attr = curses.A_NORMAL
+            if i == idx:
+                attr = color(ACCENT_PAIR, curses.A_BOLD | curses.A_REVERSE)
+            _addstr(stdscr, 4 + i - top, 2, line[:width], attr)
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        ch = key_char(key)
+        if key == curses.KEY_UP or ch == "k":
+            idx = (idx - 1) % len(rows)
+        elif key == curses.KEY_DOWN or ch == "j":
+            idx = (idx + 1) % len(rows)
+        elif key in (curses.KEY_ENTER, 10, 13, ord(" ")):
+            if rows[idx] is None:
+                return picked
+            name = rows[idx][0]
+            if name in picked:
+                picked.remove(name)
+            else:
+                picked.append(name)
+        elif ch == "x":
+            picked = []
+        elif key == 27 or ch == "q":
+            return None
+
+
 def default_browse_start():
     """Where the folder browser opens: the deployed root, else the local dev copy, else cwd."""
     for root in (CORE_APPS, LOCAL_CORE_APPS):
@@ -1307,171 +1483,298 @@ def default_browse_start():
     return "."
 
 
-def tui_wizard(stdscr, initial_scope=None, initial_days_ago=0):
-    """Ask When?/Which data? and return (scope, days_ago), or None if cancelled.
+# Stands in for "the user backed out" where None is itself a valid answer (all time,
+# everything).
+CANCELLED = object()
 
-    initial_scope/initial_days_ago preselect the current settings when this is
-    reopened from the results screen (the "s" settings shortcut) rather than
-    always starting fresh at Today/Everything.
-    """
-    curses.curs_set(0)
+WHEN_LABELS = {0: "Today", 1: "Yesterday", None: "All time"}
+SCOPE_LABELS = {None: "Everything (captures + uploads)", "captures": "Captures only",
+                "upload": "Uploads only", "local": f"Everything from local ({LOCAL_CORE_APPS})"}
 
-    day_index = {0: 0, 1: 1, None: 2}.get(initial_days_ago, 3)
+
+def when_label(days_ago):
+    return WHEN_LABELS.get(days_ago, f"{days_ago} days ago")
+
+
+def scope_label(scope):
+    return SCOPE_LABELS.get(scope, scope)
+
+
+def date_for(days_ago):
+    return date.today() - timedelta(days=days_ago) if days_ago is not None else None
+
+
+def tui_pick_when(stdscr, initial=0):
+    """Ask When? and return days_ago (None = all time), or CANCELLED."""
+    day_index = {0: 0, 1: 1, None: 2}.get(initial, 3)
     choice = curses_menu(
         stdscr, "robo-stats", subtitle="When?",
         options=["Today", "Yesterday", "All time", "Enter a specific number of days ago..."],
         default_index=day_index)
     if choice is None:
-        return None
+        return CANCELLED
     if choice == 3:
-        default_days = initial_days_ago if day_index == 3 else 0
-        days_ago = curses_prompt_int(stdscr, "How many days ago? (0 = today)", default=default_days)
-    else:
-        days_ago = [0, 1, None][choice]
+        default_days = initial if day_index == 3 else 0
+        return curses_prompt_int(stdscr, "How many days ago? (0 = today)", default=default_days)
+    return [0, 1, None][choice]
 
-    scope_index = {None: 0, "captures": 1, "upload": 2, "local": 3}.get(initial_scope, 4)
+
+def tui_pick_scope(stdscr, initial=None):
+    """Ask Which data? and return the scope (None = everything), or CANCELLED."""
+    scope_index = {None: 0, "captures": 1, "upload": 2, "local": 3}.get(initial, 4)
     choice = curses_menu(
         stdscr, "robo-stats", subtitle="Which data?",
-        options=["Everything (captures + uploads)", "Captures only", "Uploads only",
-                 f"Everything from local ({LOCAL_CORE_APPS})", "Choose a specific folder..."],
+        options=[SCOPE_LABELS[None], SCOPE_LABELS["captures"], SCOPE_LABELS["upload"],
+                 SCOPE_LABELS["local"], "Choose a specific folder..."],
         default_index=scope_index)
     if choice is None:
-        return None
+        return CANCELLED
     if choice == 4:
-        browse_start = initial_scope if scope_index == 4 else default_browse_start()
+        browse_start = initial if scope_index == 4 else default_browse_start()
         scope = curses_browse_dir(stdscr, browse_start)
-        if scope is None:
-            return None
-    else:
-        scope = [None, "captures", "upload", "local"][choice]
+        return CANCELLED if scope is None else scope
+    return [None, "captures", "upload", "local"][choice]
 
+
+def tui_wizard(stdscr, initial_scope=None, initial_days_ago=0):
+    """Ask When?/Which data? and return (scope, days_ago), or None if cancelled.
+    Each question opens on the answer given last time."""
+    curses.curs_set(0)
+    days_ago = tui_pick_when(stdscr, initial_days_ago)
+    if days_ago is CANCELLED:
+        return None
+    scope = tui_pick_scope(stdscr, initial_scope)
+    if scope is CANCELLED:
+        return None
     return scope, days_ago
+
+
+# The TUI's settings, kept between runs so a station board comes back the way it was
+# left. The station name lives in STATION_FILE instead, shared with --code/--name.
+SETTINGS_FILE = os.path.expanduser("~/.rf-stats.json")
+
+SETTINGS_VALID = {
+    "days_ago": lambda v: v is None or (isinstance(v, int) and not isinstance(v, bool)),
+    "scope": lambda v: v is None or isinstance(v, str),
+    "fields": lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v),
+    "score": lambda v: isinstance(v, bool),
+    "last": lambda v: isinstance(v, bool),
+}
+
+
+def load_settings():
+    """Saved TUI settings over the defaults; a missing, garbled or stale value just
+    falls back to its default."""
+    settings = {"days_ago": 0, "scope": None, "fields": ["operator_name"],
+                "score": True, "last": True}
+    try:
+        with open(SETTINGS_FILE) as f:
+            saved = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    if isinstance(saved, dict):
+        for key, valid in SETTINGS_VALID.items():
+            if key in saved and valid(saved[key]):
+                settings[key] = saved[key]
+    settings["name"] = station_name()
+    return settings
+
+
+def save_settings(settings):
+    """Write the TUI settings for the next run. A failed write only costs that memory."""
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump({k: settings[k] for k in SETTINGS_VALID}, f, indent=2)
+    except OSError:
+        pass
+
+
+def tui_settings(stdscr, settings):
+    """Every report setting on one page; Enter on a row changes it. Changes take
+    effect, and are saved, on leaving the page (the back row, q or Esc)."""
+    idx = 0
+    old_name = settings["name"]
+    while True:
+        def value(label, text):
+            return [(f"{label:<15}", curses.A_NORMAL), (text, color(ACCENT_PAIR))]
+
+        def box(on, label):
+            return [("[x]" if on else "[ ]", color(GOOD_PAIR, curses.A_BOLD) if on else curses.A_DIM),
+                    (" " + label, curses.A_NORMAL)]
+        rows = [
+            ("back", [("[ back to report ]", color(ACCENT_PAIR, curses.A_BOLD))]),
+            ("when", value("When:", when_label(settings["days_ago"]))),
+            ("scope", value("Data:", scope_label(settings["scope"]))),
+            ("fields", value("Group by:", " > ".join(settings["fields"]) or "operator")),
+            ("score", box(settings["score"], "Score")),
+            ("last", box(settings["last"], "Last")),
+            ("name", value("Station name:", settings["name"])),
+        ]
+        choice = curses_menu(stdscr, "robo-stats", [label for _, label in rows],
+                             subtitle="Settings", default_index=idx,
+                             footer="up/down move   enter change   q back to report")
+        if choice is None or rows[choice][0] == "back":
+            break
+        idx = choice
+        key = rows[choice][0]
+        if key == "when":
+            days_ago = tui_pick_when(stdscr, settings["days_ago"])
+            if days_ago is not CANCELLED:
+                settings["days_ago"] = days_ago
+        elif key == "scope":
+            scope = tui_pick_scope(stdscr, settings["scope"])
+            if scope is not CANCELLED:
+                settings["scope"] = scope
+        elif key == "fields":
+            stdscr.erase()
+            _addstr(stdscr, 0, 2, "Scanning metadata...", curses.A_DIM)
+            stdscr.refresh()
+            found, total = scan_meta_fields(dirs_for(settings["scope"]),
+                                            date_for(settings["days_ago"]))
+            start = settings["fields"] or [f for f, _ in found if f == "operator_name"]
+            picked = curses_pick_fields(stdscr, found, total, start)
+            if picked is not None:
+                settings["fields"] = picked
+        elif key in ("score", "last"):
+            settings[key] = not settings[key]
+        elif key == "name":
+            settings["name"] = curses_prompt_str(
+                stdscr, "Station name (as labelled in the Shift Report)", default=settings["name"])
+    save_settings(settings)
+    if settings["name"] != old_name:
+        save_station_name(settings["name"])
 
 
 # How long the results screen sits before re-scanning on its own.
 REFRESH_SECONDS = 10
 
-BREAKDOWN_HINTS = {
-    0: "v split by task type",
-    1: "v add event breakdown",
-    2: "v add last duration",
-    3: "v hide breakdown",
-}
 
-
-def render_report(stdscr, lines, level):
+def render_report(stdscr, lines):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
+    draw_guide(stdscr, 0, f"enter refresh (auto every {REFRESH_SECONDS}s)   s settings   "
+                          "c code   q quit")
+    # The table sits between its first and last rule: header just above the first,
+    # TOTAL just below the last.
+    rules = [i for i, line in enumerate(lines) if line and set(line) == {"-"}]
+    header = rules[0] - 1 if rules else None
+    total = rules[-1] + 1 if rules else None
     for i, line in enumerate(lines):
-        if i >= h - 2:
+        if i + 2 >= h:
             break
-        _addstr(stdscr, i, 2, line[:max(w - 4, 0)])
-    footer = (f"enter refresh (auto every {REFRESH_SECONDS}s)   {BREAKDOWN_HINTS[level]}   "
-              "c code   s settings   q quit")
-    _addstr(stdscr, h - 1, 2, footer[:max(w - 4, 0)], curses.A_DIM)
+        if i == header:
+            attr = color(ACCENT_PAIR, curses.A_BOLD)
+        elif i == total:
+            attr = color(GOOD_PAIR, curses.A_BOLD)
+        elif i in rules or line.startswith(("Report generated", "Filtered to", "Last checked")):
+            attr = curses.A_DIM
+        elif line.startswith("No session_meta"):
+            attr = color(WARN_PAIR, curses.A_BOLD)
+        else:
+            attr = curses.A_NORMAL
+        _addstr(stdscr, i + 2, 2, line[:max(w - 4, 0)], attr)
     stdscr.refresh()
 
 
-QR_COLOR_PAIR = 1
+
+def draw_qr_row(stdscr, y, x, cells):
+    """Draw one row of qr_cells. In colour each cell is an upper half block, top module
+    as foreground and bottom as background, so line spacing takes the bottom module's
+    colour rather than showing as a stripe; without colour, plain glyphs reversed."""
+    if not curses.has_colors():
+        _addstr(stdscr, y, x, "".join(QR_HALF_BLOCKS[c] for c in cells), curses.A_REVERSE)
+        return
+    # (top, bottom) -> glyph and pair; solid cells are spaces in the background colour.
+    looks = {(0, 0): (" ", QR_COLOR_PAIR), (1, 0): ("\u2580", QR_COLOR_PAIR),
+             (0, 1): ("\u2580", QR_INVERSE_PAIR), (1, 1): (" ", QR_INVERSE_PAIR)}
+    run, run_pair = "", None
+    for cell in cells:
+        glyph, pair = looks[cell]
+        if pair != run_pair and run:
+            _addstr(stdscr, y, x, run, curses.color_pair(run_pair))
+            x += len(run)
+            run = ""
+        run_pair = pair
+        run += glyph
+    if run:
+        _addstr(stdscr, y, x, run, curses.color_pair(run_pair))
 
 
-def tui_qr(stdscr, code, subject=""):
-    """Fill the screen with the code as a QR code, for a phone to scan off the station.
+def tui_code(stdscr, settings):
+    """Show the Shift Report code for the current filters as a QR code for a phone to
+    scan, with the code itself printed underneath to copy instead.
 
-    Drawn in its own black-on-white pair rather than the terminal's colours, since an
-    inverted QR code is one most phones will not read. A window too small for the whole
-    code says so instead of showing a clipped one, which would scan as nothing.
-    """
-    try:
-        lines = qr_lines(mailto_uri(code, subject=subject))
-    except ValueError:
-        lines = None
-
-    stdscr.erase()
-    h, w = stdscr.getmaxyx()
-    if lines is None:
-        _addstr(stdscr, 0, 2,
-                "Too many operators to fit a QR code -- copy the code instead."[:max(w - 4, 0)])
-    elif len(lines) + 1 > h or len(lines[0]) > w:
-        _addstr(stdscr, 0, 2, "Window too small for the QR code."[:max(w - 4, 0)])
-        _addstr(stdscr, 1, 2, f"Needs {len(lines[0])} x {len(lines) + 1}, "
-                              f"this window is {w} x {h}."[:max(w - 4, 0)], curses.A_DIM)
-    else:
-        attr = curses.color_pair(QR_COLOR_PAIR) if curses.has_colors() else curses.A_REVERSE
-        left = (w - len(lines[0])) // 2
-        top = (h - 1 - len(lines)) // 2
-        for i, line in enumerate(lines):
-            _addstr(stdscr, top + i, left, line, attr)
-    _addstr(stdscr, h - 1, 2, "any key back"[:max(w - 4, 0)], curses.A_DIM)
-    stdscr.refresh()
-    stdscr.getch()
-
-
-def tui_code(stdscr, scope, days_ago, code_state):
-    """Show the pasteable Shift Report code for the current filters and offer to copy it.
-
-    The station name is asked for once and written to ~/.rf-station, so the next
-    run on this machine already knows it. The scan runs at level 0 -- one row per
-    operator, matching what a station block holds.
+    The QR code is drawn in its own black-on-white pair rather than the terminal's
+    colours, since an inverted QR code is one most phones will not read. A window too
+    small for the whole QR code says so and shows just the text: a clipped one scans
+    as nothing. The scan runs at level 0 -- one row per operator, matching what a
+    station block holds.
     """
     stdscr.erase()
     _addstr(stdscr, 0, 2, "Building code...", curses.A_DIM)
     stdscr.refresh()
 
-    target_date = date.today() - timedelta(days=days_ago) if days_ago is not None else None
-    stats = gather_stats(dirs_for(scope), target_date, 0)
+    target_date = date_for(settings["days_ago"])
+    stats = gather_stats(dirs_for(settings["scope"]), target_date, 0)
+    payload = build_code_payload(stats, target_date, settings["name"])
+    code = encode_code_rf2(payload)
+    try:
+        qr = qr_cells(mailto_uri(code, subject=code_subject(payload)))
+    except ValueError:
+        qr = None
     status = ""
 
     while True:
-        payload = build_code_payload(stats, target_date, code_state["name"])
-        code = encode_code_rf2(payload)
-
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         width = max(w - 4, 20)
-        _addstr(stdscr, 0, 2, "Shift Report code", curses.A_BOLD)
-        _addstr(stdscr, 1, 2, code_summary(payload)[:width], curses.A_DIM)
-        row = 3
-        for i in range(0, len(code), width):
-            if row >= h - 3:
+        code_rows = [code[i:i + width] for i in range(0, len(code), width)]
+        draw_guide(stdscr, 0, "c copy   q back")
+        draw_segments(stdscr, 1, 2, [("Shift Report code: ", color(ACCENT_PAIR, curses.A_BOLD)),
+                                     (code_summary(payload), color(GOOD_PAIR, curses.A_BOLD))], width)
+        row = 2
+        # Guide, summary, QR code, code text, status line.
+        if qr is None:
+            _addstr(stdscr, row, 2, "Too many operators to fit a QR code -- copy the code "
+                                    "below instead."[:width], color(WARN_PAIR))
+            row += 2
+        elif 2 + len(qr) + len(code_rows) + 1 > h or len(qr[0]) > w:
+            _addstr(stdscr, row, 2, f"Window too small for the QR code (needs {len(qr[0])} x "
+                                    f"{2 + len(qr) + len(code_rows) + 1}, this is {w} x {h}) -- "
+                                    "enlarge it, or copy the code below."[:width], color(WARN_PAIR))
+            row += 2
+        else:
+            left = (w - len(qr[0])) // 2
+            for cells in qr:
+                draw_qr_row(stdscr, row, left, cells)
+                row += 1
+        for line in code_rows:
+            if row >= h - 1:
                 break
-            _addstr(stdscr, row, 2, code[i:i + width])
+            _addstr(stdscr, row, 2, line, color(ACCENT_PAIR, curses.A_BOLD))
             row += 1
         if status:
-            _addstr(stdscr, min(row + 1, h - 3), 2, status[:width], curses.A_DIM)
-        _addstr(stdscr, h - 1, 2, "c copy   p QR for phone   n name   q back"[:width], curses.A_DIM)
+            _addstr(stdscr, h - 1, 2, status[:width], color(GOOD_PAIR))
         stdscr.refresh()
 
         key = stdscr.getch()
-        ch = key_char(key)
-        if ch == "p":
-            tui_qr(stdscr, code, code_subject(payload))
-        elif ch == "c":
+        if key == curses.KEY_RESIZE:
+            continue
+        if key_char(key) == "c":
             tool = copy_to_clipboard(code)
             status = (f"Copied to the clipboard with {tool}." if tool else
                       "No clipboard tool found -- select the code above to copy it.")
-        elif ch == "n":
-            name = curses_prompt_str(stdscr, "Station name (as labelled in the Shift Report)",
-                                     default=code_state["name"])
-            code_state["name"] = name
-            status = (f"Saved as the station name for this machine ({STATION_FILE})."
-                      if save_station_name(name) else
-                      f"Using {name} for now -- {STATION_FILE} could not be written.")
         else:
             return
 
 
-def tui_results(stdscr, scope, days_ago):
+def tui_results(stdscr, settings):
     """Show the report and keep the TUI open, re-scanning every REFRESH_SECONDS and
     every time Enter is pressed -- so an operator can leave it up while a session
     records and check progress live.
-    Press v to cycle the breakdown: operator only -> + task type -> + event object
-    (task/part) -> back to operator only. Levels above the first also show each row's
-    average session score.
-    Press s to change the When?/Which data? settings without restarting.
-    Press c for the pasteable Shift Report code covering the same filters."""
-    level = 0
-    code_state = {"name": station_name()}
+    Press s for the settings page: time, data, fields to group by (in the order
+    ticked), the Score and Last columns, and the station name.
+    Press c for the Shift Report code covering the same filters, as a QR code."""
     timed_out = False
     while True:
         # A refresh nobody asked for leaves the old report up while it scans, so a
@@ -1482,18 +1785,19 @@ def tui_results(stdscr, scope, days_ago):
             stdscr.refresh()
         timed_out = False
 
-        dirs = dirs_for(scope)
-        target_date = date.today() - timedelta(days=days_ago) if days_ago is not None else None
-        stats = gather_stats(dirs, target_date, level)
+        days_ago = settings["days_ago"]
+        target_date = date_for(days_ago)
+        stats = gather_stats(dirs_for(settings["scope"]), target_date, 0, settings["fields"])
         filter_desc = f"{target_date} ({days_ago} day(s) ago)" if target_date is not None else None
-        lines = format_report(stats, filter_desc, level)
+        lines = format_report(stats, filter_desc, 0, settings["fields"],
+                              score=settings["score"], last=settings["last"])
         lines += ["", f"Last checked: {datetime.now():%H:%M:%S}"]
 
         # Counted from the scan, not from the last keypress, so a resize or a stray
         # key does not push the next refresh back.
         deadline = time.monotonic() + REFRESH_SECONDS
         while True:
-            render_report(stdscr, lines, level)
+            render_report(stdscr, lines)
             # Wait for a key only until the refresh is due, then go back to blocking:
             # the screens opened from here wait on a key for as long as it takes.
             stdscr.timeout(max(0, int((deadline - time.monotonic()) * 1000)))
@@ -1505,16 +1809,11 @@ def tui_results(stdscr, scope, days_ago):
             ch = key_char(key)
             if key in (curses.KEY_ENTER, 10, 13):
                 break  # refresh
-            if ch == "v":
-                level = (level + 1) % len(BREAKDOWN_HINTS)
-                break  # re-gather at the new breakdown level
             if ch == "c":
-                tui_code(stdscr, scope, days_ago, code_state)
+                tui_code(stdscr, settings)
                 continue  # back to the report, refreshing at once if it came due meanwhile
             if ch == "s":
-                new_settings = tui_wizard(stdscr, initial_scope=scope, initial_days_ago=days_ago)
-                if new_settings is not None:
-                    scope, days_ago = new_settings
+                tui_settings(stdscr, settings)
                 break  # re-gather with the (possibly updated) settings
             if key == 27 or ch == "q":
                 return  # quit
@@ -1522,13 +1821,14 @@ def tui_results(stdscr, scope, days_ago):
 
 def tui_app(stdscr):
     curses.curs_set(0)
-    if curses.has_colors():
-        curses.init_pair(QR_COLOR_PAIR, curses.COLOR_BLACK, curses.COLOR_WHITE)
-    wizard_result = tui_wizard(stdscr)
+    init_colors()
+    settings = load_settings()
+    wizard_result = tui_wizard(stdscr, settings["scope"], settings["days_ago"])
     if wizard_result is None:
         return True  # cancelled before ever showing a report
-    scope, days_ago = wizard_result
-    tui_results(stdscr, scope, days_ago)
+    settings["scope"], settings["days_ago"] = wizard_result
+    save_settings(settings)
+    tui_results(stdscr, settings)
     return False
 
 
