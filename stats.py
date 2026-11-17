@@ -1154,7 +1154,18 @@ def dirs_for(scope):
         return upload_dirs(CORE_APPS)
     if scope == "local":
         return all_dirs(LOCAL_CORE_APPS)
-    return [scope]
+    # A parent folder (one holding captures*/upload/successfully_uploaded) reads those.
+    found = [d for d in all_dirs(scope) if os.path.isdir(d)]
+    return found or [scope]
+
+
+def location_desc(dirs):
+    """The folders a scan reads, as one line: parent (names) when they share a parent."""
+    found = [d for d in dirs if os.path.isdir(d)] or dirs
+    parents = {os.path.dirname(d) for d in found}
+    if len(found) > 1 and len(parents) == 1:
+        return f"{parents.pop()} ({', '.join(os.path.basename(d) for d in found)})"
+    return ", ".join(found)
 
 
 def main():
@@ -1163,7 +1174,8 @@ def main():
     parser.add_argument("-d", "--dir", metavar="SCOPE", default=None,
                          help="Which data to scan: 'captures' (every captures* folder), "
                               "'upload' (upload + successfully_uploaded), 'local' (all of the above under "
-                              f"{LOCAL_CORE_APPS}), or a custom folder path. "
+                              f"{LOCAL_CORE_APPS}), or a custom folder path (a parent of captures*/upload/"
+                              "successfully_uploaded reads those). "
                               "Default: captures* + upload + successfully_uploaded.")
     parser.add_argument("-t", "--days-ago", type=int, metavar="N", help="Filter sessions by date: 0=today, 1=yesterday, etc.")
     parser.add_argument("-v", "--verbose", action="count", default=0,
@@ -1476,11 +1488,9 @@ def curses_pick_fields(stdscr, fields, total, chosen):
 
 
 def default_browse_start():
-    """Where the folder browser opens: the deployed root, else the local dev copy, else cwd."""
-    for root in (CORE_APPS, LOCAL_CORE_APPS):
-        if os.path.isdir(root):
-            return root
-    return "."
+    """Where the folder browser opens: ~/Workspace, else home."""
+    workspace = os.path.expanduser("~/Workspace")
+    return workspace if os.path.isdir(workspace) else os.path.expanduser("~")
 
 
 # Stands in for "the user backed out" where None is itself a valid answer (all time,
@@ -1520,10 +1530,10 @@ def tui_pick_when(stdscr, initial=0):
 
 
 def tui_pick_scope(stdscr, initial=None):
-    """Ask Which data? and return the scope (None = everything), or CANCELLED."""
+    """Ask Location? and return the scope (None = everything), or CANCELLED."""
     scope_index = {None: 0, "captures": 1, "upload": 2, "local": 3}.get(initial, 4)
     choice = curses_menu(
-        stdscr, "robo-stats", subtitle="Which data?",
+        stdscr, "robo-stats", subtitle="Location?",
         options=[SCOPE_LABELS[None], SCOPE_LABELS["captures"], SCOPE_LABELS["upload"],
                  SCOPE_LABELS["local"], "Choose a specific folder..."],
         default_index=scope_index)
@@ -1537,7 +1547,7 @@ def tui_pick_scope(stdscr, initial=None):
 
 
 def tui_wizard(stdscr, initial_scope=None, initial_days_ago=0):
-    """Ask When?/Which data? and return (scope, days_ago), or None if cancelled.
+    """Ask When?/Location? and return (scope, days_ago), or None if cancelled.
     Each question opens on the answer given last time."""
     curses.curs_set(0)
     days_ago = tui_pick_when(stdscr, initial_days_ago)
@@ -1604,7 +1614,7 @@ def tui_settings(stdscr, settings):
         rows = [
             ("back", [("[ back to report ]", color(ACCENT_PAIR, curses.A_BOLD))]),
             ("when", value("When:", when_label(settings["days_ago"]))),
-            ("scope", value("Data:", scope_label(settings["scope"]))),
+            ("scope", value("Location:", scope_label(settings["scope"]))),
             ("fields", value("Group by:", " > ".join(settings["fields"]) or "operator")),
             ("score", box(settings["score"], "Score")),
             ("last", box(settings["last"], "Last")),
@@ -1666,7 +1676,8 @@ def render_report(stdscr, lines):
             attr = color(ACCENT_PAIR, curses.A_BOLD)
         elif i == total:
             attr = color(GOOD_PAIR, curses.A_BOLD)
-        elif i in rules or line.startswith(("Report generated", "Filtered to", "Last checked")):
+        elif i in rules or line.startswith(("Report generated", "Location", "Filtered to",
+                                             "Last checked")):
             attr = curses.A_DIM
         elif line.startswith("No session_meta"):
             attr = color(WARN_PAIR, curses.A_BOLD)
@@ -1787,10 +1798,12 @@ def tui_results(stdscr, settings):
 
         days_ago = settings["days_ago"]
         target_date = date_for(days_ago)
-        stats = gather_stats(dirs_for(settings["scope"]), target_date, 0, settings["fields"])
+        dirs = dirs_for(settings["scope"])
+        stats = gather_stats(dirs, target_date, 0, settings["fields"])
         filter_desc = f"{target_date} ({days_ago} day(s) ago)" if target_date is not None else None
         lines = format_report(stats, filter_desc, 0, settings["fields"],
                               score=settings["score"], last=settings["last"])
+        lines.insert(1, f"Location: {location_desc(dirs)}")
         lines += ["", f"Last checked: {datetime.now():%H:%M:%S}"]
 
         # Counted from the scan, not from the last keypress, so a resize or a stray
